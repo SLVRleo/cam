@@ -46,9 +46,12 @@
 
 const ICE = [
   { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun.cloudflare.com:3478" },
   { urls: "turn:openrelay.metered.ca:80",  username: "openrelayproject", credential: "openrelayproject" },
   { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
   { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turns:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
 const PEER_OPTS = { config: { iceServers: ICE } };
 
@@ -96,7 +99,16 @@ function askKey() {
   });
 }
 
-/* =================================  HOST (PC)  ============================= */
+function logIce(pc, tag) {
+  if (!pc) return;
+  pc.oniceconnectionstatechange = () =>
+    console.log("[cam] " + tag + " ice=" + pc.iceConnectionState);
+}
+
+/* =================================  HOST (PC)  =============================
+   Host INICIA a chamada (oferta já carrega webcam+áudio). Viewer só anuncia
+   presença por um data-channel; host então liga pra ele.
+   ========================================================================== */
 async function runHost(key) {
   const ROOM = await roomFromKey(key);
   say('<span class="dot"></span>ligando câmera…');
@@ -111,63 +123,88 @@ async function runHost(key) {
     return;
   }
   video.srcObject = stream;
+  const viewers = {};
 
+  function callViewer(id) {
+    try { if (viewers[id]) viewers[id].close(); } catch (e) {}
+    const call = peer.call(id, stream);       // oferta COM trilhas
+    viewers[id] = call;
+    logIce(call.peerConnection, "host");
+    call.on("close", () => { delete viewers[id]; });
+    say('<span class="dot"></span>celular conectado ✓<br><small>transmitindo.</small>');
+  }
+
+  let peer;
   function start() {
-    const peer = new Peer(ROOM, PEER_OPTS);
+    peer = new Peer(ROOM, PEER_OPTS);
     peer.on("open", () => say('<span class="dot"></span>online — esperando o celular…<br><small>pode minimizar. LED da câmera fica aceso.</small>'));
-    peer.on("call", call => {
-      call.answer(stream);
-      say('<span class="dot"></span>celular conectado ✓<br><small>transmitindo.</small>');
-      call.on("close", () => say('<span class="dot"></span>online — esperando o celular…'));
+    // viewer chega e anuncia presença via data-channel:
+    peer.on("connection", conn => {
+      conn.on("open", () => callViewer(conn.peer));
+      conn.on("data", d => { if (d === "hi") callViewer(conn.peer); });
     });
+    // fallback: se um viewer antigo ligar direto, responde com a stream:
+    peer.on("call", call => { call.answer(stream); logIce(call.peerConnection, "host-ans"); });
     peer.on("disconnected", () => peer.reconnect());
     peer.on("error", err => {
       if (err.type === "unavailable-id") {
         say("<b>já tem um HOST aberto</b><br>Feche o outro. Retentando…");
         setTimeout(() => { try { peer.destroy(); } catch(e){} start(); }, 5000);
       } else {
-        say('<span class="dot"></span>reconectando… (' + err.type + ')');
+        console.log("[cam] host err=" + err.type);
       }
     });
   }
   start();
 }
 
-/* ================================  VIEW (celular)  ========================= */
+/* ================================  VIEW (celular)  =========================
+   Viewer abre data-channel pro host (anuncia presença) e ESPERA a chamada.
+   ========================================================================== */
 async function runView(key) {
   const ROOM = await roomFromKey(key);
   say('<span class="dot"></span>conectando…');
-  const peer = new Peer(PEER_OPTS);
-  let call, retry;
+  let peer, conn, retry, got = false;
 
-  function connect() {
+  function announce() {
     clearTimeout(retry);
-    call = peer.call(ROOM, new MediaStream());
-    if (!call) { retry = setTimeout(connect, 2500); return; }
-    let got = false;
-    call.on("stream", remote => {
-      got = true; clearTimeout(retry);
-      video.srcObject = remote; hide();
-      video.play().catch(() => {});
-      if (video.muted) tap.classList.add("show");
-    });
-    call.on("close", () => { say('<span class="dot"></span>reconectando…'); retry = setTimeout(connect, 2000); });
-    call.on("error", () => { retry = setTimeout(connect, 2500); });
-    retry = setTimeout(() => { if (!got) { try { call.close(); } catch(e){} connect(); } }, 8000);
+    try { if (conn) conn.close(); } catch (e) {}
+    conn = peer.connect(ROOM, { reliable: true });
+    conn.on("open", () => { try { conn.send("hi"); } catch (e) {} });
+    conn.on("error", () => {});
+    // se não receber vídeo em 9s, reanuncia
+    retry = setTimeout(() => { if (!got) announce(); }, 9000);
   }
 
-  peer.on("open", connect);
-  peer.on("disconnected", () => peer.reconnect());
-  peer.on("error", err => {
-    if (err.type === "peer-unavailable")
-      say('<span class="dot"></span>HOST offline — abra <b>?host</b> no PC.<br>tentando…');
-    retry = setTimeout(connect, 2500);
-  });
+  function start() {
+    got = false;
+    peer = new Peer(PEER_OPTS);
+    peer.on("open", announce);
+    peer.on("call", call => {
+      call.answer();                          // só recebe
+      logIce(call.peerConnection, "view");
+      call.on("stream", remote => {
+        got = true; clearTimeout(retry);
+        video.srcObject = remote; hide();
+        video.play().catch(() => {});
+        if (video.muted) tap.classList.add("show");
+      });
+      call.on("close", () => { got = false; say('<span class="dot"></span>reconectando…'); announce(); });
+    });
+    peer.on("disconnected", () => peer.reconnect());
+    peer.on("error", err => {
+      console.log("[cam] view err=" + err.type);
+      if (err.type === "peer-unavailable")
+        say('<span class="dot"></span>HOST offline — abra <b>?host</b> no PC.<br>tentando…');
+      clearTimeout(retry); retry = setTimeout(() => { if (!got) announce(); }, 3000);
+    });
+  }
 
   tap.addEventListener("click", () => {
     video.muted = false; video.play().catch(() => {});
     tap.classList.remove("show");
   });
+  start();
 }
 
 /* ==============================  ROTEADOR  ================================= */
