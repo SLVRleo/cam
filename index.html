@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>cam</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
+  video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
+  #msg {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 24px; color: #888; font-size: 15px; line-height: 1.6;
+    background: #000; z-index: 10; -webkit-user-select: none; user-select: none;
+  }
+  #msg.hidden { display: none; }
+  #msg b { color: #ccc; }
+  #tap {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.55); color: #fff; font-size: 20px; z-index: 20;
+    -webkit-user-select: none; user-select: none;
+  }
+  #tap.show { display: flex; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#3b82f6; margin-right:8px; vertical-align:middle; animation:pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
+  form { display:flex; flex-direction:column; gap:12px; max-width:320px; margin:0 auto; }
+  input, button { font-size:16px; padding:12px; border-radius:8px; border:1px solid #333; background:#111; color:#eee; }
+  button { background:#1d4ed8; border-color:#1d4ed8; cursor:pointer; }
+</style>
+</head>
+<body>
+  <video id="v" autoplay playsinline muted></video>
+  <div id="msg"><span></span></div>
+  <div id="tap">👆 toque para ligar o som</div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+/* ==========================================================================
+   SEM SEGREDO NO CÓDIGO.
+   A chave vem da URL, no fragmento (#...), que nunca é enviado ao servidor
+   nem fica no repositório. Ex.:  .../?host#MINHACHAVE   e   .../?view#MINHACHAVE
+   ROOM (id no broker) = derivado da chave => sem a chave, ninguém conecta.
+   ========================================================================== */
+
+const ICE = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "turn:openrelay.metered.ca:80",  username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+];
+const PEER_OPTS = { config: { iceServers: ICE } };
+
+const video  = document.getElementById("v");
+const msgBox = document.getElementById("msg");
+const msgTxt = msgBox.querySelector("span");
+const tap    = document.getElementById("tap");
+
+const params = new URLSearchParams(location.search);
+const mode = params.get("mode")
+          || (location.search.includes("host") ? "host"
+          :  location.search.includes("view") ? "view" : null);
+
+function say(html) { msgTxt.innerHTML = html; msgBox.classList.remove("hidden"); }
+function hide()    { msgBox.classList.add("hidden"); }
+
+/* deriva um id estável e opaco a partir da chave (SHA-256 hex) */
+async function roomFromKey(key) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("cam|" + key));
+  return "cam-" + Array.from(new Uint8Array(buf)).slice(0, 16)
+                       .map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function getKey() {
+  return decodeURIComponent((location.hash || "").replace(/^#/, "")).trim();
+}
+
+/* pede a chave se não houver no #fragmento */
+function askKey() {
+  return new Promise(resolve => {
+    msgBox.innerHTML = "";
+    const f = document.createElement("form");
+    f.innerHTML = '<b style="color:#ccc">chave de acesso</b>'
+                + '<input id="k" type="password" autocomplete="off" placeholder="cole a chave">'
+                + '<button type="submit">entrar</button>';
+    msgBox.appendChild(f);
+    msgBox.classList.remove("hidden");
+    f.addEventListener("submit", e => {
+      e.preventDefault();
+      const v = f.querySelector("#k").value.trim();
+      if (!v) return;
+      location.hash = encodeURIComponent(v);
+      resolve(v);
+    });
+  });
+}
+
+/* =================================  HOST (PC)  ============================= */
+async function runHost(key) {
+  const ROOM = await roomFromKey(key);
+  say('<span class="dot"></span>ligando câmera…');
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: { echoCancellation: true, noiseSuppression: true }
+    });
+  } catch (e) {
+    say("<b>sem acesso à câmera/mic</b><br>" + e.message + "<br><br>Permita câmera e microfone.");
+    return;
+  }
+  video.srcObject = stream;
+
+  function start() {
+    const peer = new Peer(ROOM, PEER_OPTS);
+    peer.on("open", () => say('<span class="dot"></span>online — esperando o celular…<br><small>pode minimizar. LED da câmera fica aceso.</small>'));
+    peer.on("call", call => {
+      call.answer(stream);
+      say('<span class="dot"></span>celular conectado ✓<br><small>transmitindo.</small>');
+      call.on("close", () => say('<span class="dot"></span>online — esperando o celular…'));
+    });
+    peer.on("disconnected", () => peer.reconnect());
+    peer.on("error", err => {
+      if (err.type === "unavailable-id") {
+        say("<b>já tem um HOST aberto</b><br>Feche o outro. Retentando…");
+        setTimeout(() => { try { peer.destroy(); } catch(e){} start(); }, 5000);
+      } else {
+        say('<span class="dot"></span>reconectando… (' + err.type + ')');
+      }
+    });
+  }
+  start();
+}
+
+/* ================================  VIEW (celular)  ========================= */
+async function runView(key) {
+  const ROOM = await roomFromKey(key);
+  say('<span class="dot"></span>conectando…');
+  const peer = new Peer(PEER_OPTS);
+  let call, retry;
+
+  function connect() {
+    clearTimeout(retry);
+    call = peer.call(ROOM, new MediaStream());
+    if (!call) { retry = setTimeout(connect, 2500); return; }
+    let got = false;
+    call.on("stream", remote => {
+      got = true; clearTimeout(retry);
+      video.srcObject = remote; hide();
+      video.play().catch(() => {});
+      if (video.muted) tap.classList.add("show");
+    });
+    call.on("close", () => { say('<span class="dot"></span>reconectando…'); retry = setTimeout(connect, 2000); });
+    call.on("error", () => { retry = setTimeout(connect, 2500); });
+    retry = setTimeout(() => { if (!got) { try { call.close(); } catch(e){} connect(); } }, 8000);
+  }
+
+  peer.on("open", connect);
+  peer.on("disconnected", () => peer.reconnect());
+  peer.on("error", err => {
+    if (err.type === "peer-unavailable")
+      say('<span class="dot"></span>HOST offline — abra <b>?host</b> no PC.<br>tentando…');
+    retry = setTimeout(connect, 2500);
+  });
+
+  tap.addEventListener("click", () => {
+    video.muted = false; video.play().catch(() => {});
+    tap.classList.remove("show");
+  });
+}
+
+/* ==============================  ROTEADOR  ================================= */
+(async () => {
+  if (!mode) {
+    say("<b>cam</b><br><br>PC (webcam): abra <b>?host#SUACHAVE</b><br>"
+      + "Celular: abra <b>?view#SUACHAVE</b>");
+    return;
+  }
+  let key = getKey();
+  if (!key) key = await askKey();
+  if (mode === "host") runHost(key);
+  else runView(key);
+})();
+</script>
+</body>
+</html>
