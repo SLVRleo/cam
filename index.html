@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
 <title>cam</title>
 <style>
   :root { color-scheme: dark; }
@@ -44,14 +46,13 @@
    ROOM (id no broker) = derivado da chave => sem a chave, ninguém conecta.
    ========================================================================== */
 
+const BUILD = "b5-stun";
 const ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
   { urls: "stun:stun.cloudflare.com:3478" },
-  { urls: "turn:openrelay.metered.ca:80",  username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turns:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "stun:stun.nextcloud.com:3478" },
 ];
 const PEER_OPTS = { config: { iceServers: ICE } };
 
@@ -166,7 +167,7 @@ function askKey() {
 async function runHost(key) {
   ROLE = "HOST";
   const ROOM = await roomFromKey(key);
-  rpt("boot", { room: ROOM.slice(0, 12) });
+  rpt("boot", { b: BUILD, room: ROOM.slice(0, 12) });
   say('<span class="dot"></span>ligando câmera…');
   let stream;
   try {
@@ -223,7 +224,7 @@ async function runHost(key) {
 async function runView(key) {
   ROLE = "VIEW";
   const ROOM = await roomFromKey(key);
-  rpt("boot", { room: ROOM.slice(0, 12) });
+  rpt("boot", { b: BUILD, room: ROOM.slice(0, 12) });
   say('<span class="dot"></span>conectando…');
   let peer, conn, retry, got = false, tries = 0;
 
