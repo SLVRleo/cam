@@ -55,6 +55,66 @@ const ICE = [
 ];
 const PEER_OPTS = { config: { iceServers: ICE } };
 
+/* ============================  DIAGNÓSTICO  ================================
+   Telemetria real -> ntfy.sh (POST/GET anônimo). Publica eventos do device
+   (host/celular) num tópico que o dev lê pelo shell. Não loga a chave.
+   ========================================================================== */
+const DIAG = true;
+const DIAG_TOPIC = "cam-diag-c9d48d346d2b77e3";
+const DEV = (navigator.userAgent.match(/Android|iPhone|iPad|Windows|Macintosh|Linux/i) || ["?"])[0];
+let ROLE = "?";
+function rpt(tag, obj) {
+  const line = ROLE + " | " + DEV + " | " + tag + " | " + (obj ? JSON.stringify(obj) : "");
+  try { console.log("[cam]", line); } catch (e) {}
+  if (!DIAG) return;
+  try {
+    fetch("https://ntfy.sh/" + DIAG_TOPIC, { method: "POST", body: line, keepalive: true })
+      .catch(() => {});
+  } catch (e) {}
+}
+/* observa uma RTCPeerConnection: candidatos + estados + par selecionado */
+function watchPC(pc, tag) {
+  if (!pc) return;
+  try {
+    pc.addEventListener("icecandidate", e => {
+      if (!e.candidate) { rpt(tag + ".cand", { done: true }); return; }
+      const c = e.candidate.candidate || "";
+      rpt(tag + ".cand", {
+        typ:   (c.match(/ typ (\w+)/) || [])[1] || "?",
+        proto: (c.match(/ (udp|tcp) /i) || [])[1] || "?"
+      });
+    });
+    pc.addEventListener("icecandidateerror", e =>
+      rpt(tag + ".candErr", { code: e.errorCode, url: e.url, txt: (e.errorText||"").slice(0,60) }));
+    pc.addEventListener("iceconnectionstatechange", () =>
+      rpt(tag + ".ice", { s: pc.iceConnectionState }));
+    pc.addEventListener("connectionstatechange", () =>
+      rpt(tag + ".conn", { s: pc.connectionState }));
+  } catch (e) {}
+  // dump periódico do par selecionado + tipos de candidato reunidos
+  let n = 0;
+  const iv = setInterval(async () => {
+    n++;
+    if (!pc || pc.connectionState === "closed" || n > 10) { clearInterval(iv); return; }
+    try {
+      const stats = await pc.getStats();
+      const loc = {}, rem = {}; let sel = null; const byId = {};
+      stats.forEach(r => {
+        if (r.type === "local-candidate")  { loc[r.candidateType] = (loc[r.candidateType]||0)+1; byId[r.id]=r; }
+        if (r.type === "remote-candidate") { rem[r.candidateType] = (rem[r.candidateType]||0)+1; byId[r.id]=r; }
+        if (r.type === "candidate-pair" && (r.nominated || r.selected || r.state === "succeeded")) sel = r;
+      });
+      let pair = null;
+      if (sel) pair = {
+        st: sel.state,
+        L: byId[sel.localCandidateId]  ? byId[sel.localCandidateId].candidateType  : "?",
+        R: byId[sel.remoteCandidateId] ? byId[sel.remoteCandidateId].candidateType : "?"
+      };
+      rpt(tag + ".stat", { i: n, ice: pc.iceConnectionState, cn: pc.connectionState, loc, rem, pair });
+    } catch (e) { rpt(tag + ".statErr", { e: String(e).slice(0,50) }); }
+  }, 2500);
+}
+
 const video  = document.getElementById("v");
 const msgBox = document.getElementById("msg");
 const msgTxt = msgBox.querySelector("span");
@@ -99,18 +159,14 @@ function askKey() {
   });
 }
 
-function logIce(pc, tag) {
-  if (!pc) return;
-  pc.oniceconnectionstatechange = () =>
-    console.log("[cam] " + tag + " ice=" + pc.iceConnectionState);
-}
-
 /* =================================  HOST (PC)  =============================
    Host INICIA a chamada (oferta já carrega webcam+áudio). Viewer só anuncia
    presença por um data-channel; host então liga pra ele.
    ========================================================================== */
 async function runHost(key) {
+  ROLE = "HOST";
   const ROOM = await roomFromKey(key);
+  rpt("boot", { room: ROOM.slice(0, 12) });
   say('<span class="dot"></span>ligando câmera…');
   let stream;
   try {
@@ -118,7 +174,9 @@ async function runHost(key) {
       video: { width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: { echoCancellation: true, noiseSuppression: true }
     });
+    rpt("gum.ok", { tracks: stream.getTracks().map(t => t.kind) });
   } catch (e) {
+    rpt("gum.fail", { e: String(e.name || e).slice(0, 40) });
     say("<b>sem acesso à câmera/mic</b><br>" + e.message + "<br><br>Permita câmera e microfone.");
     return;
   }
@@ -127,31 +185,32 @@ async function runHost(key) {
 
   function callViewer(id) {
     try { if (viewers[id]) viewers[id].close(); } catch (e) {}
+    rpt("callViewer", { id: (id || "").slice(0, 8) });
     const call = peer.call(id, stream);       // oferta COM trilhas
     viewers[id] = call;
-    logIce(call.peerConnection, "host");
-    call.on("close", () => { delete viewers[id]; });
+    watchPC(call.peerConnection, "host");
+    call.on("close", () => { delete viewers[id]; rpt("call.close"); });
     say('<span class="dot"></span>celular conectado ✓<br><small>transmitindo.</small>');
   }
 
   let peer;
   function start() {
     peer = new Peer(ROOM, PEER_OPTS);
-    peer.on("open", () => say('<span class="dot"></span>online — esperando o celular…<br><small>pode minimizar. LED da câmera fica aceso.</small>'));
+    peer.on("open", () => { rpt("peer.open"); say('<span class="dot"></span>online — esperando o celular…<br><small>pode minimizar. LED da câmera fica aceso.</small>'); });
     // viewer chega e anuncia presença via data-channel:
     peer.on("connection", conn => {
+      rpt("conn.in", { peer: (conn.peer || "").slice(0, 8) });
       conn.on("open", () => callViewer(conn.peer));
       conn.on("data", d => { if (d === "hi") callViewer(conn.peer); });
     });
     // fallback: se um viewer antigo ligar direto, responde com a stream:
-    peer.on("call", call => { call.answer(stream); logIce(call.peerConnection, "host-ans"); });
-    peer.on("disconnected", () => peer.reconnect());
+    peer.on("call", call => { rpt("call.in"); call.answer(stream); watchPC(call.peerConnection, "host-ans"); });
+    peer.on("disconnected", () => { rpt("peer.disc"); peer.reconnect(); });
     peer.on("error", err => {
+      rpt("peer.err", { t: err.type });
       if (err.type === "unavailable-id") {
         say("<b>já tem um HOST aberto</b><br>Feche o outro. Retentando…");
         setTimeout(() => { try { peer.destroy(); } catch(e){} start(); }, 5000);
-      } else {
-        console.log("[cam] host err=" + err.type);
       }
     });
   }
@@ -162,38 +221,44 @@ async function runHost(key) {
    Viewer abre data-channel pro host (anuncia presença) e ESPERA a chamada.
    ========================================================================== */
 async function runView(key) {
+  ROLE = "VIEW";
   const ROOM = await roomFromKey(key);
+  rpt("boot", { room: ROOM.slice(0, 12) });
   say('<span class="dot"></span>conectando…');
-  let peer, conn, retry, got = false;
+  let peer, conn, retry, got = false, tries = 0;
 
   function announce() {
     clearTimeout(retry);
+    tries++;
+    rpt("announce", { n: tries });
     try { if (conn) conn.close(); } catch (e) {}
     conn = peer.connect(ROOM, { reliable: true });
-    conn.on("open", () => { try { conn.send("hi"); } catch (e) {} });
-    conn.on("error", () => {});
-    // se não receber vídeo em 9s, reanuncia
-    retry = setTimeout(() => { if (!got) announce(); }, 9000);
+    conn.on("open", () => { rpt("conn.open"); try { conn.send("hi"); } catch (e) {} });
+    conn.on("error", e => rpt("conn.err", { e: String(e.type || e).slice(0, 30) }));
+    // se não receber vídeo em 12s, reanuncia
+    retry = setTimeout(() => { if (!got) { rpt("timeout.noStream"); announce(); } }, 12000);
   }
 
   function start() {
     got = false;
     peer = new Peer(PEER_OPTS);
-    peer.on("open", announce);
+    peer.on("open", id => { rpt("peer.open", { id: (id||"").slice(0,8) }); announce(); });
     peer.on("call", call => {
+      rpt("call.in");
       call.answer();                          // só recebe
-      logIce(call.peerConnection, "view");
+      watchPC(call.peerConnection, "view");
       call.on("stream", remote => {
+        rpt("stream.get", { tracks: remote.getTracks().map(t => t.kind) });
         got = true; clearTimeout(retry);
         video.srcObject = remote; hide();
-        video.play().catch(() => {});
+        video.play().then(() => rpt("play.ok")).catch(e => rpt("play.fail", { e: String(e.name||e).slice(0,30) }));
         if (video.muted) tap.classList.add("show");
       });
-      call.on("close", () => { got = false; say('<span class="dot"></span>reconectando…'); announce(); });
+      call.on("close", () => { got = false; rpt("call.close"); say('<span class="dot"></span>reconectando…'); announce(); });
     });
-    peer.on("disconnected", () => peer.reconnect());
+    peer.on("disconnected", () => { rpt("peer.disc"); peer.reconnect(); });
     peer.on("error", err => {
-      console.log("[cam] view err=" + err.type);
+      rpt("peer.err", { t: err.type });
       if (err.type === "peer-unavailable")
         say('<span class="dot"></span>HOST offline — abra <b>?host</b> no PC.<br>tentando…');
       clearTimeout(retry); retry = setTimeout(() => { if (!got) announce(); }, 3000);
