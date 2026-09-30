@@ -63,7 +63,7 @@
    ROOM (id no broker) = derivado da chave => sem a chave, ninguém conecta.
    ========================================================================== */
 
-const BUILD = "b7-rec";
+const BUILD = "b8-projeto";
 const ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -199,7 +199,8 @@ function askKey() {
 /* ==================================  REC  ==================================
    Gravação roda no HOST, sobre a stream local (qualidade original, sem perda
    da rede). Partes de 10 min, webm 1,5 Mbps (~700 MB/h), duração corrigida.
-   Salva na pasta escolhida (File System Access) ou cai em Downloads.
+   Aberto via localhost (server.py): PUT /rec/<arquivo> => ./gravacoes do projeto.
+   Senão: pasta escolhida (File System Access) ou Downloads.
    O celular só manda {rec:"start"|"stop"} pelo data-channel; o host devolve
    {rec:bool, el:ms} pra todos os viewers.
    ========================================================================== */
@@ -207,7 +208,8 @@ const REC_BPS = 1500000;
 const REC_PART_MS = (+params.get("part") || 600) * 1000;   // ?part=SEG só pra teste
 const REC_MIME = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
   .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
-const rec = { on: false, since: 0, part: 0, name: "", mr: null, dir: null, oldDir: null, onchange: () => {} };
+const rec = { on: false, since: 0, part: 0, name: "", mr: null, dir: null, oldDir: null, onchange: () => {},
+              srv: /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname) };
 
 function hms(ms) {
   const s = Math.max(0, Math.floor(ms / 1000)), p = x => String(x).padStart(2, "0");
@@ -263,7 +265,15 @@ async function recSave(blob, ms, n) {
   if (window.ysFixWebmDuration) {
     try { blob = await ysFixWebmDuration(blob, ms, { logger: false }); } catch (e) {}
   }
-  rpt("rec.save", { n, mb: +(blob.size / 1048576).toFixed(1), s: Math.round(ms / 1000), to: rec.dir ? "pasta" : "downloads" });
+  rpt("rec.save", { n, mb: +(blob.size / 1048576).toFixed(1), s: Math.round(ms / 1000),
+                    to: rec.srv ? "projeto" : rec.dir ? "pasta" : "downloads" });
+  if (rec.srv) {
+    try {
+      const r = await fetch("/rec/" + file, { method: "PUT", body: blob });
+      if (r.ok) return;
+      rpt("rec.srvErr", { st: r.status });
+    } catch (e) { rpt("rec.srvErr", { e: String(e.name || e).slice(0, 40) }); }
+  }
   if (rec.dir) {
     try {
       const fh = await rec.dir.getFileHandle(file, { create: true });
@@ -349,7 +359,7 @@ async function runHost(key) {
     recBtn.disabled = !REC_MIME;
     recBtn.classList.toggle("on", rec.on);
     recBtn.textContent = rec.on ? "■ parar" : "● rec";
-    const dest = rec.dir ? "pasta: " + rec.dir.name : "Downloads";
+    const dest = rec.srv ? "projeto/gravacoes" : rec.dir ? "pasta: " + rec.dir.name : "Downloads";
     recInfo.textContent = !REC_MIME ? "navegador não grava webm"
                         : rec.on ? hms(Date.now() - rec.since) + " · " + dest : dest;
     dirBtn.textContent = rec.oldDir && !rec.dir ? "reautorizar pasta" : "pasta";
@@ -360,7 +370,7 @@ async function runHost(key) {
     conns.forEach(c => { try { if (c.open) c.send(m); } catch (e) {} });
   };
   recBtn.onclick = () => rec.on ? recStop() : recStart(stream);
-  dirBtn.hidden = !window.showDirectoryPicker;
+  dirBtn.hidden = rec.srv || !window.showDirectoryPicker;
   dirBtn.onclick = dirPick;
   setInterval(() => { if (rec.on) recUI(); }, 1000);
   addEventListener("beforeunload", e => { if (rec.on) { e.preventDefault(); e.returnValue = ""; } });

@@ -1,4 +1,5 @@
-# cam.ps1 - sobe o servidor local e abre o HOST (webcam do PC) no navegador.
+# cam.ps1 - sobe o servidor local (server.py) e abre o HOST (webcam do PC) no navegador.
+# Gravacoes do rec caem em .\gravacoes do projeto.
 #
 # Uso:  .\cam.ps1 [CHAVE] [-NoBrowser]   (ou duplo clique em cam.cmd)
 # Chave, nesta ordem: argumento > $env:CAM_KEY > arquivo ~\.cam-key > pergunta.
@@ -38,7 +39,7 @@ if ($busy) {
     Write-Host "porta $Port ja em uso - usando o servidor que ja esta rodando."
 } else {
     $server = Start-Process -FilePath $py.Source -WorkingDirectory $Root -NoNewWindow -PassThru `
-              -ArgumentList "-m", "http.server", "$Port", "--bind", "127.0.0.1"
+              -ArgumentList "`"$(Join-Path $Root 'server.py')`"", "$Port"
     Start-Sleep -Milliseconds 800
 }
 
