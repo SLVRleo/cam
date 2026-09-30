@@ -30,14 +30,31 @@
   form { display:flex; flex-direction:column; gap:12px; max-width:320px; margin:0 auto; }
   input, button { font-size:16px; padding:12px; border-radius:8px; border:1px solid #333; background:#111; color:#eee; }
   button { background:#1d4ed8; border-color:#1d4ed8; cursor:pointer; }
+  #bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex; gap: 10px;
+    align-items: center; justify-content: center;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    background: linear-gradient(transparent, rgba(0,0,0,.75));
+  }
+  #bar.hidden { display: none; }
+  #bar button { padding: 10px 16px; font-size: 15px; background: #111; border-color: #333; }
+  #bar button:disabled { opacity: .4; cursor: default; }
+  #recBtn.on { background: #b91c1c; border-color: #b91c1c; }
+  #recInfo { color: #ddd; font-size: 14px; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
   <video id="v" autoplay playsinline muted></video>
   <div id="msg"><span></span></div>
   <div id="tap">👆 toque para ligar o som</div>
+  <div id="bar" class="hidden">
+    <button id="recBtn" disabled>● rec</button>
+    <span id="recInfo"></span>
+    <button id="dirBtn" hidden>pasta</button>
+  </div>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fix-webm-duration@1.0.6/fix-webm-duration.js"></script>
 <script>
 /* ==========================================================================
    SEM SEGREDO NO CÓDIGO.
@@ -46,7 +63,7 @@
    ROOM (id no broker) = derivado da chave => sem a chave, ninguém conecta.
    ========================================================================== */
 
-const BUILD = "b6-dedupe";
+const BUILD = "b7-rec";
 const ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -135,6 +152,10 @@ const video  = document.getElementById("v");
 const msgBox = document.getElementById("msg");
 const msgTxt = msgBox.querySelector("span");
 const tap    = document.getElementById("tap");
+const bar     = document.getElementById("bar");
+const recBtn  = document.getElementById("recBtn");
+const recInfo = document.getElementById("recInfo");
+const dirBtn  = document.getElementById("dirBtn");
 
 const params = new URLSearchParams(location.search);
 const mode = params.get("mode")
@@ -175,6 +196,128 @@ function askKey() {
   });
 }
 
+/* ==================================  REC  ==================================
+   Gravação roda no HOST, sobre a stream local (qualidade original, sem perda
+   da rede). Partes de 10 min, webm 1,5 Mbps (~700 MB/h), duração corrigida.
+   Salva na pasta escolhida (File System Access) ou cai em Downloads.
+   O celular só manda {rec:"start"|"stop"} pelo data-channel; o host devolve
+   {rec:bool, el:ms} pra todos os viewers.
+   ========================================================================== */
+const REC_BPS = 1500000;
+const REC_PART_MS = (+params.get("part") || 600) * 1000;   // ?part=SEG só pra teste
+const REC_MIME = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
+  .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
+const rec = { on: false, since: 0, part: 0, name: "", mr: null, dir: null, oldDir: null, onchange: () => {} };
+
+function hms(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000)), p = x => String(x).padStart(2, "0");
+  return p(Math.floor(s / 3600)) + ":" + p(Math.floor(s / 60) % 60) + ":" + p(s % 60);
+}
+
+function recStart(stream) {
+  if (rec.on || !REC_MIME) return;
+  const d = new Date(), p = x => String(x).padStart(2, "0");
+  rec.name = "cam-" + d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate())
+           + "_" + p(d.getHours()) + "-" + p(d.getMinutes()) + "-" + p(d.getSeconds());
+  rec.on = true; rec.since = Date.now(); rec.part = 0; rec.videoOnly = false;
+  recPart(stream);
+  rpt("rec.start", { mime: REC_MIME, dir: !!rec.dir });
+  rec.onchange();
+}
+
+function recStop() {
+  if (!rec.on) return;
+  rec.on = false;
+  try { rec.mr.stop(); } catch (e) {}
+  rpt("rec.stop", { s: Math.round((Date.now() - rec.since) / 1000) });
+  rec.onchange();
+}
+
+/* uma parte = um MediaRecorder; ao fim de REC_PART_MS troca por outro */
+function recPart(stream) {
+  const chunks = [], t0 = Date.now(), n = ++rec.part;
+  const src = rec.videoOnly ? new MediaStream(stream.getVideoTracks()) : stream;
+  const mr = new MediaRecorder(src, { mimeType: REC_MIME, videoBitsPerSecond: REC_BPS, audioBitsPerSecond: 128000 });
+  rec.mr = mr;
+  mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  mr.onerror = e => rpt("rec.err", { e: String((e.error && e.error.name) || e).slice(0, 40) });
+  const cut = setTimeout(() => { if (rec.on && rec.mr === mr) { recPart(stream); mr.stop(); } }, REC_PART_MS);
+  // áudio que não entrega amostras trava o muxer (0 bytes): refaz só com vídeo
+  const dog = setTimeout(() => {
+    if (rec.on && rec.mr === mr && !chunks.length && !rec.videoOnly) {
+      rpt("rec.noData"); rec.videoOnly = true; rec.part--; recPart(stream); mr.stop();
+    }
+  }, 12000);
+  mr.onstop = () => {
+    clearTimeout(cut); clearTimeout(dog);
+    recSave(new Blob(chunks, { type: "video/webm" }), Date.now() - t0, n);
+    // parou sozinho (câmera caiu etc.)
+    if (rec.on && rec.mr === mr) { rec.on = false; rpt("rec.endedAlone"); rec.onchange(); }
+  };
+  mr.start(5000);
+}
+
+async function recSave(blob, ms, n) {
+  if (!blob.size) { rpt("rec.empty", { n }); return; }
+  const file = rec.name + "_parte" + String(n).padStart(2, "0") + ".webm";
+  if (window.ysFixWebmDuration) {
+    try { blob = await ysFixWebmDuration(blob, ms, { logger: false }); } catch (e) {}
+  }
+  rpt("rec.save", { n, mb: +(blob.size / 1048576).toFixed(1), s: Math.round(ms / 1000), to: rec.dir ? "pasta" : "downloads" });
+  if (rec.dir) {
+    try {
+      const fh = await rec.dir.getFileHandle(file, { create: true });
+      const w = await fh.createWritable();
+      await w.write(blob); await w.close();
+      return;
+    } catch (e) { rpt("rec.dirErr", { e: String(e.name || e).slice(0, 40) }); }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = file;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
+/* pasta de gravação: handle guardado no IndexedDB entre sessões */
+function dirStore(val) {
+  return new Promise(res => {
+    try {
+      const r = indexedDB.open("cam", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("kv");
+      r.onerror = () => res(null);
+      r.onsuccess = () => {
+        const s = r.result.transaction("kv", val ? "readwrite" : "readonly").objectStore("kv");
+        const q = val ? s.put(val, "dir") : s.get("dir");
+        q.onsuccess = () => res(q.result || null);
+        q.onerror = () => res(null);
+      };
+    } catch (e) { res(null); }
+  });
+}
+
+async function dirRestore() {
+  const h = await dirStore();
+  if (!h) return;
+  try {
+    if (await h.queryPermission({ mode: "readwrite" }) === "granted") rec.dir = h;
+    else rec.oldDir = h;               // precisa de clique pra reautorizar
+  } catch (e) {}
+}
+
+async function dirPick() {
+  try {
+    if (rec.oldDir && await rec.oldDir.requestPermission({ mode: "readwrite" }) === "granted") {
+      rec.dir = rec.oldDir; rec.oldDir = null;
+    } else {
+      rec.dir = await showDirectoryPicker({ id: "cam-rec", mode: "readwrite" });
+      rec.oldDir = null;
+      dirStore(rec.dir);
+    }
+    rpt("rec.dir", { ok: true });
+  } catch (e) { rpt("rec.dir", { ok: false, e: String(e.name || e).slice(0, 30) }); }
+  rec.onchange();
+}
+
 /* =================================  HOST (PC)  =============================
    Host INICIA a chamada (oferta já carrega webcam+áudio). Viewer só anuncia
    presença por um data-channel; host então liga pra ele.
@@ -198,6 +341,32 @@ async function runHost(key) {
   }
   video.srcObject = stream;
   const viewers = {};
+  const conns = new Set();
+
+  // ---- rec: UI local + estado espelhado nos viewers
+  const recMsg = () => ({ rec: rec.on, el: rec.on ? Date.now() - rec.since : 0 });
+  function recUI() {
+    recBtn.disabled = !REC_MIME;
+    recBtn.classList.toggle("on", rec.on);
+    recBtn.textContent = rec.on ? "■ parar" : "● rec";
+    const dest = rec.dir ? "pasta: " + rec.dir.name : "Downloads";
+    recInfo.textContent = !REC_MIME ? "navegador não grava webm"
+                        : rec.on ? hms(Date.now() - rec.since) + " · " + dest : dest;
+    dirBtn.textContent = rec.oldDir && !rec.dir ? "reautorizar pasta" : "pasta";
+  }
+  rec.onchange = () => {
+    recUI();
+    const m = recMsg();
+    conns.forEach(c => { try { if (c.open) c.send(m); } catch (e) {} });
+  };
+  recBtn.onclick = () => rec.on ? recStop() : recStart(stream);
+  dirBtn.hidden = !window.showDirectoryPicker;
+  dirBtn.onclick = dirPick;
+  setInterval(() => { if (rec.on) recUI(); }, 1000);
+  addEventListener("beforeunload", e => { if (rec.on) { e.preventDefault(); e.returnValue = ""; } });
+  bar.classList.remove("hidden");
+  recUI();
+  dirRestore().then(recUI);
 
   function callViewer(id) {
     try { if (viewers[id]) viewers[id].close(); } catch (e) {}
@@ -216,7 +385,13 @@ async function runHost(key) {
     // viewer chega e anuncia presença via data-channel:
     peer.on("connection", conn => {
       rpt("conn.in", { peer: (conn.peer || "").slice(0, 8) });
-      conn.on("data", d => { if (d === "hi") callViewer(conn.peer); });
+      conns.add(conn);
+      conn.on("close", () => conns.delete(conn));
+      conn.on("data", d => {
+        if (d === "hi") { callViewer(conn.peer); try { conn.send(recMsg()); } catch (e) {} }
+        else if (d && d.rec === "start") recStart(stream);
+        else if (d && d.rec === "stop")  recStop();
+      });
     });
     // fallback: se um viewer antigo ligar direto, responde com a stream:
     peer.on("call", call => { rpt("call.in"); call.answer(stream); watchPC(call.peerConnection, "host-ans"); });
@@ -242,6 +417,21 @@ async function runView(key) {
   say('<span class="dot"></span>conectando…');
   let peer, conn, retry, got = false, tries = 0;
 
+  // ---- rec: botão manda comando; estado vem do host
+  let recOn = false, recSince = 0;
+  function recUI() {
+    recBtn.classList.toggle("on", recOn);
+    recBtn.textContent = recOn ? "■ parar" : "● rec";
+    recInfo.textContent = recOn ? hms(Date.now() - recSince) : "";
+  }
+  recBtn.onclick = () => {
+    try { conn.send({ rec: recOn ? "stop" : "start" }); } catch (e) {}
+    recBtn.disabled = true;                   // reabilita quando o host responder
+    setTimeout(() => { recBtn.disabled = !(conn && conn.open); }, 3000);
+  };
+  setInterval(() => { if (recOn) recUI(); }, 1000);
+  bar.classList.remove("hidden");
+
   function announce() {
     clearTimeout(retry);
     tries++;
@@ -249,6 +439,12 @@ async function runView(key) {
     try { if (conn) conn.close(); } catch (e) {}
     conn = peer.connect(ROOM, { reliable: true });
     conn.on("open", () => { rpt("conn.open"); try { conn.send("hi"); } catch (e) {} });
+    conn.on("data", d => {
+      if (!d || typeof d.rec !== "boolean") return;
+      recOn = d.rec; recSince = Date.now() - (d.el || 0);
+      recBtn.disabled = false; recUI();
+    });
+    conn.on("close", () => { recBtn.disabled = true; });
     conn.on("error", e => rpt("conn.err", { e: String(e.type || e).slice(0, 30) }));
     // se não receber vídeo em 12s, reanuncia
     retry = setTimeout(() => { if (!got) { rpt("timeout.noStream"); announce(); } }, 12000);
