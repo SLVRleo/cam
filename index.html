@@ -85,7 +85,7 @@
    sem a chave, ninguém conecta. "trocar chave" desconecta os pareados.
    ========================================================================== */
 
-const BUILD = "b10-pareado";
+const BUILD = "b11";
 const ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -362,7 +362,7 @@ async function runHost(key, fresh) {
     const box = document.getElementById("qr");
     if (window.qrcode) {
       const q = qrcode(0, "M");
-      q.addData(viewBase + "?view#" + encodeURIComponent(key));
+      q.addData(viewBase + "?view&v=" + BUILD + "#" + encodeURIComponent(key));   // v= fura cache
       q.make();
       box.innerHTML = q.createSvgTag(6, 2);
     } else box.textContent = "falha ao carregar o gerador de QR";
