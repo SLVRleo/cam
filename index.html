@@ -46,7 +46,7 @@
    ROOM (id no broker) = derivado da chave => sem a chave, ninguém conecta.
    ========================================================================== */
 
-const BUILD = "b5-stun";
+const BUILD = "b6-dedupe";
 const ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -64,26 +64,41 @@ const DIAG = true;
 const DIAG_TOPIC = "cam-diag-c9d48d346d2b77e3";
 const DEV = (navigator.userAgent.match(/Android|iPhone|iPad|Windows|Macintosh|Linux/i) || ["?"])[0];
 let ROLE = "?";
+/* ntfy anônimo limita rajadas (429): linhas vão pra fila e saem em lote */
+const DIAG_Q = [];
+let diagT = null;
+function diagFlush() {
+  clearTimeout(diagT); diagT = null;
+  while (DIAG_Q.length) {
+    let body = "";
+    while (DIAG_Q.length && body.length + DIAG_Q[0].length < 3500) body += DIAG_Q.shift() + "\n";
+    if (!body) body = DIAG_Q.shift().slice(0, 3500);
+    try {
+      fetch("https://ntfy.sh/" + DIAG_TOPIC, { method: "POST", body, keepalive: true })
+        .catch(() => {});
+    } catch (e) {}
+  }
+}
+addEventListener("pagehide", diagFlush);
 function rpt(tag, obj) {
   const line = ROLE + " | " + DEV + " | " + tag + " | " + (obj ? JSON.stringify(obj) : "");
   try { console.log("[cam]", line); } catch (e) {}
   if (!DIAG) return;
-  try {
-    fetch("https://ntfy.sh/" + DIAG_TOPIC, { method: "POST", body: line, keepalive: true })
-      .catch(() => {});
-  } catch (e) {}
+  DIAG_Q.push(line);
+  if (!diagT) diagT = setTimeout(diagFlush, 4000);
 }
 /* observa uma RTCPeerConnection: candidatos + estados + par selecionado */
 function watchPC(pc, tag) {
   if (!pc) return;
   try {
+    // candidatos: só conta por tipo/protocolo e reporta um resumo no fim
+    const cands = {};
     pc.addEventListener("icecandidate", e => {
-      if (!e.candidate) { rpt(tag + ".cand", { done: true }); return; }
+      if (!e.candidate) { rpt(tag + ".cand", { done: true, cands }); return; }
       const c = e.candidate.candidate || "";
-      rpt(tag + ".cand", {
-        typ:   (c.match(/ typ (\w+)/) || [])[1] || "?",
-        proto: (c.match(/ (udp|tcp) /i) || [])[1] || "?"
-      });
+      const k = ((c.match(/ typ (\w+)/) || [])[1] || "?") + "/"
+              + ((c.match(/ (udp|tcp) /i) || [])[1] || "?").toLowerCase();
+      cands[k] = (cands[k] || 0) + 1;
     });
     pc.addEventListener("icecandidateerror", e =>
       rpt(tag + ".candErr", { code: e.errorCode, url: e.url, txt: (e.errorText||"").slice(0,60) }));
@@ -201,7 +216,6 @@ async function runHost(key) {
     // viewer chega e anuncia presença via data-channel:
     peer.on("connection", conn => {
       rpt("conn.in", { peer: (conn.peer || "").slice(0, 8) });
-      conn.on("open", () => callViewer(conn.peer));
       conn.on("data", d => { if (d === "hi") callViewer(conn.peer); });
     });
     // fallback: se um viewer antigo ligar direto, responde com a stream:
@@ -249,6 +263,7 @@ async function runView(key) {
       call.answer();                          // só recebe
       watchPC(call.peerConnection, "view");
       call.on("stream", remote => {
+        if (video.srcObject === remote) return;
         rpt("stream.get", { tracks: remote.getTracks().map(t => t.kind) });
         got = true; clearTimeout(retry);
         video.srcObject = remote; hide();
