@@ -2,14 +2,13 @@
 # Gravacoes do rec caem em .\gravacoes do projeto.
 #
 # Uso:  .\cam.ps1 [CHAVE] [-NoBrowser]   (ou duplo clique em cam.cmd)
-# Sem chave = sala padrao (quem tiver o link ve a camera).
-# Chave opcional cria sala separada: argumento > $env:CAM_KEY > arquivo ~\.cam-key.
+# A chave fica guardada no navegador (gerada na 1a vez). Celular: botao "parear" no PC.
+# Chave opcional forca uma especifica: argumento > $env:CAM_KEY > arquivo ~\.cam-key.
 
 param([string]$Key, [switch]$NoBrowser)
 
 $ErrorActionPreference = "Stop"
 $Port     = 8765
-$PagesUrl = "https://slvrleo.github.io/cam/"   # onde o celular abre o ?view
 $KeyFile  = Join-Path $HOME ".cam-key"
 $Root     = $PSScriptRoot
 
@@ -51,7 +50,7 @@ else          { Start-Process $HostUrl }
 
 Write-Host ""
 Write-Host "HOST (PC):     $HostUrl"
-Write-Host "CELULAR:       $PagesUrl`?view$Frag"
+Write-Host "CELULAR:       clique em parear no PC e escaneie o QR (so na 1a vez)"
 Write-Host ""
 
 if ($server) {

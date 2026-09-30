@@ -40,6 +40,17 @@
   #bar button:disabled { opacity: .4; cursor: default; }
   #recBtn.on { background: #b91c1c; border-color: #b91c1c; }
   #recInfo { color: #ddd; font-size: 14px; font-variant-numeric: tabular-nums; }
+  #pair {
+    position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; gap: 14px;
+    align-items: center; justify-content: center; padding: 16px; text-align: center;
+    background: rgba(0,0,0,.92); color: #ccc; font-size: 15px;
+  }
+  #pair.hidden { display: none; }
+  #qr { background: #fff; padding: 12px; border-radius: 8px; line-height: 0; }
+  #qr svg { width: min(280px, 70vw); height: auto; }
+  #pair .row { display: flex; gap: 10px; }
+  #pair button { padding: 10px 16px; font-size: 15px; background: #111; border-color: #333; }
+  #pair button.go { background: #1d4ed8; border-color: #1d4ed8; }
 </style>
 </head>
 <body>
@@ -50,19 +61,31 @@
     <button id="recBtn" disabled>● rec</button>
     <span id="recInfo"></span>
     <button id="dirBtn" hidden>pasta</button>
+    <button id="pairBtn" hidden>📱 parear</button>
+  </div>
+  <div id="pair" class="hidden">
+    <b>parear celular</b>
+    <div id="qr"></div>
+    <div>aponte a câmera do celular pro QR.<br><small>o celular guarda a chave; só precisa uma vez.</small></div>
+    <div class="row">
+      <button id="pairNew">trocar chave</button>
+      <button id="pairClose" class="go">pronto</button>
+    </div>
   </div>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/fix-webm-duration@1.0.6/fix-webm-duration.js"></script>
 <script>
 /* ==========================================================================
-   SEM CHAVE: abre direto em .../?host e .../?view (sala fixa).
-   ATENÇÃO: quem souber o link vê a câmera. Chave opcional no fragmento
-   (.../?host#CHAVE e .../?view#CHAVE) cria uma sala separada.
-   ROOM (id no broker) = SHA-256 da chave (ou da chave padrão).
+   CHAVE LEMBRADA: o host gera uma chave aleatória na 1ª vez e guarda no
+   localStorage. "📱 parear" mostra um QR com .../?view#CHAVE; o celular lê,
+   guarda a chave e tira o #fragmento da URL. Depois abre direto: ?host / ?view.
+   Nada disso vai pro repositório. ROOM (id no broker) = SHA-256 da chave =>
+   sem a chave, ninguém conecta. "trocar chave" desconecta os pareados.
    ========================================================================== */
 
-const BUILD = "b9-semchave";
+const BUILD = "b10-pareado";
 const ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -171,8 +194,24 @@ async function roomFromKey(key) {
                        .map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+const KEY_LS = "cam.key";
+const PAGES_URL = "https://slvrleo.github.io/cam/";
+function lsGet()  { try { return localStorage.getItem(KEY_LS) || ""; } catch (e) { return ""; } }
+function lsSet(v) { try { localStorage.setItem(KEY_LS, v); } catch (e) {} }
+function newKey() {
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  return btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/* chave: #fragmento (pareamento) > guardada no aparelho */
 function getKey() {
-  return decodeURIComponent((location.hash || "").replace(/^#/, "")).trim();
+  const frag = decodeURIComponent((location.hash || "").replace(/^#/, "")).trim();
+  if (frag) {
+    lsSet(frag);
+    history.replaceState(null, "", location.pathname + location.search);
+    return frag;
+  }
+  return lsGet();
 }
 
 /* ==================================  REC  ==================================
@@ -311,10 +350,40 @@ async function dirPick() {
    Host INICIA a chamada (oferta já carrega webcam+áudio). Viewer só anuncia
    presença por um data-channel; host então liga pra ele.
    ========================================================================== */
-async function runHost(key) {
+async function runHost(key, fresh) {
   ROLE = "HOST";
   const ROOM = await roomFromKey(key);
   rpt("boot", { b: BUILD, room: ROOM.slice(0, 12) });
+
+  // ---- parear (antes da câmera: funciona mesmo se ela falhar)
+  const pair = document.getElementById("pair");
+  const viewBase = rec.srv ? PAGES_URL : location.origin + location.pathname;
+  function showPair() {
+    const box = document.getElementById("qr");
+    if (window.qrcode) {
+      const q = qrcode(0, "M");
+      q.addData(viewBase + "?view#" + encodeURIComponent(key));
+      q.make();
+      box.innerHTML = q.createSvgTag(6, 2);
+    } else box.textContent = "falha ao carregar o gerador de QR";
+    document.getElementById("pairNew").disabled = rec.on;
+    pair.classList.remove("hidden");
+  }
+  const pairBtn = document.getElementById("pairBtn");
+  pairBtn.hidden = false;
+  pairBtn.onclick = showPair;
+  document.getElementById("pairClose").onclick = () => pair.classList.add("hidden");
+  document.getElementById("pairNew").onclick = () => {
+    if (rec.on) return;
+    lsSet(newKey());
+    sessionStorage.setItem("cam.showPair", "1");
+    location.reload();
+  };
+  if (fresh || sessionStorage.getItem("cam.showPair")) {
+    sessionStorage.removeItem("cam.showPair");
+    showPair();
+  }
+  bar.classList.remove("hidden");
   say('<span class="dot"></span>ligando câmera…');
   let stream;
   try {
@@ -356,6 +425,7 @@ async function runHost(key) {
   bar.classList.remove("hidden");
   recUI();
   dirRestore().then(recUI);
+
 
   function callViewer(id) {
     try { if (viewers[id]) viewers[id].close(); } catch (e) {}
@@ -461,7 +531,7 @@ async function runView(key) {
     peer.on("error", err => {
       rpt("peer.err", { t: err.type });
       if (err.type === "peer-unavailable")
-        say('<span class="dot"></span>HOST offline — abra <b>?host</b> no PC.<br>tentando…');
+        say('<span class="dot"></span>HOST offline — abra <b>?host</b> no PC.<br><small>se trocou a chave, pareie de novo pelo QR.</small><br>tentando…');
       clearTimeout(retry); retry = setTimeout(() => { if (!got) announce(); }, 3000);
     });
   }
@@ -480,9 +550,14 @@ async function runView(key) {
       + "Celular: abra <b>?view</b>");
     return;
   }
-  const key = getKey() || "cam-padrao";
-  if (mode === "host") runHost(key);
-  else runView(key);
+  let key = getKey();
+  if (mode === "host") {
+    const fresh = !key;
+    if (fresh) { key = newKey(); lsSet(key); }
+    runHost(key, fresh);
+  } else if (!key) {
+    say("<b>celular não pareado</b><br><br>No PC, clique em <b>📱 parear</b><br>e escaneie o QR com a câmera do celular.");
+  } else runView(key);
 })();
 </script>
 </body>
