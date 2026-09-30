@@ -85,7 +85,7 @@
    sem a chave, ninguém conecta. "trocar chave" desconecta os pareados.
    ========================================================================== */
 
-const BUILD = "b11";
+const BUILD = "b12-heal";
 const ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -454,7 +454,11 @@ async function runHost(key, fresh) {
     });
     // fallback: se um viewer antigo ligar direto, responde com a stream:
     peer.on("call", call => { rpt("call.in"); call.answer(stream); watchPC(call.peerConnection, "host-ans"); });
-    peer.on("disconnected", () => { rpt("peer.disc"); peer.reconnect(); });
+    peer.on("disconnected", () => {
+      rpt("peer.disc");
+      say('<span class="dot"></span>sem conexão — reconectando sozinho…');
+      try { peer.reconnect(); } catch (e) {}
+    });
     peer.on("error", err => {
       rpt("peer.err", { t: err.type });
       if (err.type === "unavailable-id") {
@@ -464,6 +468,24 @@ async function runHost(key, fresh) {
     });
   }
   start();
+  healLoop(() => peer, start);
+}
+
+/* auto-recuperação: troca de rede / queda do broker => reconecta sozinho.
+   A cada 15s (e no evento "online"), se o peer não está conectado ao broker,
+   tenta reconnect(); se já foi destruído, cria outro. */
+function healLoop(getPeer, restart) {
+  function heal(why) {
+    const p = getPeer();
+    if (!p || p.open) return;
+    rpt("heal", { why, disc: p.disconnected, dead: p.destroyed });
+    if (p.destroyed) { restart(); return; }
+    if (p.disconnected) {
+      try { p.reconnect(); } catch (e) { try { p.destroy(); } catch (e2) {} restart(); }
+    }
+  }
+  setInterval(() => heal("tick"), 15000);
+  addEventListener("online", () => setTimeout(() => heal("online"), 1000));
 }
 
 /* ================================  VIEW (celular)  =========================
@@ -527,7 +549,7 @@ async function runView(key) {
       });
       call.on("close", () => { got = false; rpt("call.close"); say('<span class="dot"></span>reconectando…'); announce(); });
     });
-    peer.on("disconnected", () => { rpt("peer.disc"); peer.reconnect(); });
+    peer.on("disconnected", () => { rpt("peer.disc"); try { peer.reconnect(); } catch (e) {} });
     peer.on("error", err => {
       rpt("peer.err", { t: err.type });
       if (err.type === "peer-unavailable")
@@ -541,6 +563,7 @@ async function runView(key) {
     tap.classList.remove("show");
   });
   start();
+  healLoop(() => peer, start);
 }
 
 /* ==============================  ROTEADOR  ================================= */
