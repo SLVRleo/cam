@@ -2,8 +2,8 @@
 # Gravacoes do rec caem em .\gravacoes do projeto.
 #
 # Uso:  .\cam.ps1 [CHAVE] [-NoBrowser]   (ou duplo clique em cam.cmd)
-# Chave, nesta ordem: argumento > $env:CAM_KEY > arquivo ~\.cam-key > pergunta.
-# A chave nunca vai pro repositorio; fica so no ~\.cam-key se voce quiser salvar.
+# Sem chave = sala padrao (quem tiver o link ve a camera).
+# Chave opcional cria sala separada: argumento > $env:CAM_KEY > arquivo ~\.cam-key.
 
 param([string]$Key, [switch]$NoBrowser)
 
@@ -16,16 +16,7 @@ $Root     = $PSScriptRoot
 # ---- chave -----------------------------------------------------------------
 if (-not $Key) { $Key = $env:CAM_KEY }
 if (-not $Key -and (Test-Path $KeyFile)) { $Key = (Get-Content $KeyFile -Raw).Trim() }
-if (-not $Key) {
-    $sec = Read-Host "chave de acesso" -AsSecureString
-    $Key = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-             [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)).Trim()
-    if (-not $Key) { Write-Host "sem chave, saindo."; exit 1 }
-    if ((Read-Host "salvar em $KeyFile ? (s/N)") -match '^[sS]') {
-        Set-Content -Path $KeyFile -Value $Key -Encoding utf8 -NoNewline
-    }
-}
-$Frag = [uri]::EscapeDataString($Key)
+$Frag = if ($Key) { "#" + [uri]::EscapeDataString($Key) } else { "" }
 
 # ---- python ----------------------------------------------------------------
 $py = Get-Command py -ErrorAction SilentlyContinue
@@ -45,7 +36,7 @@ if ($busy) {
 
 # ---- navegador -------------------------------------------------------------
 # abre Chrome/Edge direto: via associacao do Windows o #fragmento (chave) pode se perder
-$HostUrl = "http://127.0.0.1:$Port/?host#$Frag"
+$HostUrl = "http://127.0.0.1:$Port/?host$Frag"
 $browser = @(
     "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
     "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
@@ -60,7 +51,7 @@ else          { Start-Process $HostUrl }
 
 Write-Host ""
 Write-Host "HOST (PC):     $HostUrl"
-Write-Host "CELULAR:       $PagesUrl`?view#$Frag"
+Write-Host "CELULAR:       $PagesUrl`?view$Frag"
 Write-Host ""
 
 if ($server) {
