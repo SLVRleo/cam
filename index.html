@@ -22,7 +22,7 @@
   #tap {
     position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
     background: rgba(0,0,0,.55); color: #fff; font-size: 20px; z-index: 20;
-    -webkit-user-select: none; user-select: none;
+    -webkit-user-select: none; user-select: none; cursor: pointer;
   }
   #tap.show { display: flex; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#3b82f6; margin-right:8px; vertical-align:middle; animation:pulse 1.4s ease-in-out infinite; }
@@ -85,7 +85,7 @@
    sem a chave, ninguém conecta. "trocar chave" desconecta os pareados.
    ========================================================================== */
 
-const BUILD = "b12-heal";
+const BUILD = "b13-som";
 const ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -544,8 +544,9 @@ async function runView(key) {
         rpt("stream.get", { tracks: remote.getTracks().map(t => t.kind) });
         got = true; clearTimeout(retry);
         video.srcObject = remote; hide();
-        video.play().then(() => rpt("play.ok")).catch(e => rpt("play.fail", { e: String(e.name||e).slice(0,30) }));
-        if (video.muted) tap.classList.add("show");
+        const a = remote.getAudioTracks()[0];
+        rpt("stream.audio", a ? { on: a.enabled, mute: a.muted, st: a.readyState } : { none: 1 });
+        playVideo();
       });
       call.on("close", () => { got = false; rpt("call.close"); say('<span class="dot"></span>reconectando…'); announce(); });
     });
@@ -558,9 +559,27 @@ async function runView(key) {
     });
   }
 
+  /* autoplay com som é barrado sem gesto (ex.: stream nova após reconectar):
+     se play() falhar, volta pro mudo — ao menos o vídeo roda — e pede o toque */
+  function playVideo() {
+    video.play().then(() => {
+      rpt("play.ok", { muted: video.muted });
+      tap.classList.toggle("show", video.muted);
+    }).catch(e => {
+      rpt("play.fail", { e: String(e.name||e).slice(0,30), muted: video.muted });
+      if (!video.muted) { video.muted = true; video.play().catch(() => {}); }
+      tap.classList.add("show");
+    });
+  }
+
   tap.addEventListener("click", () => {
-    video.muted = false; video.play().catch(() => {});
+    video.muted = false;
     tap.classList.remove("show");
+    video.play().then(() => rpt("unmute.ok")).catch(e => {
+      rpt("unmute.fail", { e: String(e.name||e).slice(0,30) });
+      video.muted = true; video.play().catch(() => {});
+      tap.classList.add("show");
+    });
   });
   start();
   healLoop(() => peer, start);
