@@ -55,6 +55,7 @@
 </head>
 <body>
   <video id="v" autoplay playsinline muted></video>
+  <audio id="snd" autoplay playsinline></audio>
   <div id="msg"><span></span></div>
   <div id="tap">👆 toque para ligar o som</div>
   <div id="bar" class="hidden">
@@ -85,7 +86,7 @@
    sem a chave, ninguém conecta. "trocar chave" desconecta os pareados.
    ========================================================================== */
 
-const BUILD = "b13-som";
+const BUILD = "b14-snd";
 const ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -174,6 +175,7 @@ const video  = document.getElementById("v");
 const msgBox = document.getElementById("msg");
 const msgTxt = msgBox.querySelector("span");
 const tap    = document.getElementById("tap");
+const snd    = document.getElementById("snd");
 const bar     = document.getElementById("bar");
 const recBtn  = document.getElementById("recBtn");
 const recInfo = document.getElementById("recInfo");
@@ -398,6 +400,10 @@ async function runHost(key, fresh) {
     return;
   }
   video.srcObject = stream;
+  const micT = stream.getAudioTracks()[0];
+  rpt("mic", micT ? { st: micT.readyState, mute: micT.muted } : { none: 1 });
+  const micTxt = () => "<br><small>mic: " + (!micT ? "nenhum — celular fica sem som"
+    : micT.readyState !== "live" ? "desligado" : (micT.label || "ok").replace(/</g, "&lt;")) + "</small>";
   const viewers = {};
   const conns = new Set();
 
@@ -434,13 +440,13 @@ async function runHost(key, fresh) {
     viewers[id] = call;
     watchPC(call.peerConnection, "host");
     call.on("close", () => { delete viewers[id]; rpt("call.close"); });
-    say('<span class="dot"></span>celular conectado ✓<br><small>transmitindo.</small>');
+    say('<span class="dot"></span>celular conectado ✓<br><small>transmitindo.</small>' + micTxt());
   }
 
   let peer;
   function start() {
     peer = new Peer(ROOM, PEER_OPTS);
-    peer.on("open", () => { rpt("peer.open"); say('<span class="dot"></span>online — esperando o celular…<br><small>pode minimizar. LED da câmera fica aceso.</small>'); });
+    peer.on("open", () => { rpt("peer.open"); say('<span class="dot"></span>online — esperando o celular…<br><small>pode minimizar. LED da câmera fica aceso.</small>' + micTxt()); });
     // viewer chega e anuncia presença via data-channel:
     peer.on("connection", conn => {
       rpt("conn.in", { peer: (conn.peer || "").slice(0, 8) });
@@ -544,9 +550,10 @@ async function runView(key) {
         rpt("stream.get", { tracks: remote.getTracks().map(t => t.kind) });
         got = true; clearTimeout(retry);
         video.srcObject = remote; hide();
-        const a = remote.getAudioTracks()[0];
-        rpt("stream.audio", a ? { on: a.enabled, mute: a.muted, st: a.readyState } : { none: 1 });
-        playVideo();
+        video.play().catch(e => rpt("play.fail", { e: String(e.name||e).slice(0,30) }));
+        watchAudio(remote);
+        snd.srcObject = remote;
+        playSound();
       });
       call.on("close", () => { got = false; rpt("call.close"); say('<span class="dot"></span>reconectando…'); announce(); });
     });
@@ -559,27 +566,33 @@ async function runView(key) {
     });
   }
 
-  /* autoplay com som é barrado sem gesto (ex.: stream nova após reconectar):
-     se play() falhar, volta pro mudo — ao menos o vídeo roda — e pede o toque */
-  function playVideo() {
-    video.play().then(() => {
-      rpt("play.ok", { muted: video.muted });
-      tap.classList.toggle("show", video.muted);
+  /* SOM: o <video> fica sempre mudo (só imagem); o áudio sai por um <audio>
+     separado — Safari/iOS às vezes não toca o áudio remoto pelo <video>
+     mesmo desmutado. Sem gesto o play() com som é barrado: pede o toque. */
+  function playSound() {
+    snd.play().then(() => {
+      rpt("snd.ok");
+      tap.classList.remove("show");
     }).catch(e => {
-      rpt("play.fail", { e: String(e.name||e).slice(0,30), muted: video.muted });
-      if (!video.muted) { video.muted = true; video.play().catch(() => {}); }
+      rpt("snd.fail", { e: String(e.name||e).slice(0,30) });
       tap.classList.add("show");
     });
   }
+  function watchAudio(remote) {
+    const a = remote.getAudioTracks()[0];
+    rpt("stream.audio", a ? { on: a.enabled, mute: a.muted, st: a.readyState } : { none: 1 });
+    if (!a) return;
+    a.onmute   = () => rpt("audio.mute");
+    a.onunmute = () => rpt("audio.unmute");
+  }
+  // trilha de áudio pode chegar depois da de vídeo (mesmo MediaStream)
+  video.addEventListener("loadedmetadata", () => {
+    if (video.srcObject) watchAudio(video.srcObject);
+  });
 
   tap.addEventListener("click", () => {
-    video.muted = false;
     tap.classList.remove("show");
-    video.play().then(() => rpt("unmute.ok")).catch(e => {
-      rpt("unmute.fail", { e: String(e.name||e).slice(0,30) });
-      video.muted = true; video.play().catch(() => {});
-      tap.classList.add("show");
-    });
+    playSound();                              // dentro do gesto: liberado
   });
   start();
   healLoop(() => peer, start);
